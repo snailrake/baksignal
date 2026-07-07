@@ -20,9 +20,18 @@ from app.services.station_quality import StationCandidate, compact_text, normali
 SOURCE = "2gis"
 BASE_URL = "https://catalog.api.2gis.com"
 TARGET_CITIES = ("Саратов", "Энгельс")
+TARGET_CITY_POINTS = {
+    "Саратов": "46.0343,51.5336",
+    "Энгельс": "46.1267,51.4855",
+}
+TARGET_CITY_RADIUS_M = {
+    "Саратов": 30_000,
+    "Энгельс": 20_000,
+}
 RUBRIC_QUERIES = ("АЗС", "автозаправочные станции", "заправки")
 EXCLUDED_RUBRIC_WORDS = ("агзс", "газозаправ", "метан", "пропан", "электрозаряд")
-PAGE_SIZE = 50
+PAGE_SIZE = 10
+MAX_PAGES = 5
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,22 @@ def rubric_names(item: dict[str, Any]) -> list[str]:
     return [item_text(rubric) for rubric in rubrics if item_text(rubric)]
 
 
+def adm_div_names(item: dict[str, Any]) -> list[str]:
+    adm_div = item.get("adm_div")
+    if not isinstance(adm_div, list):
+        return []
+    return [item_text(part) for part in adm_div if item_text(part)]
+
+
+def infer_city(item: dict[str, Any], fallback_city: str) -> str | None:
+    text = normalize_match_text(" ".join([item_address(item), item.get("name", ""), *adm_div_names(item)]))
+    if "энгельс" in text:
+        return "Энгельс"
+    if "саратов" in text:
+        return "Саратов"
+    return fallback_city if fallback_city in TARGET_CITIES else None
+
+
 def looks_like_gas_only(item: dict[str, Any]) -> bool:
     text = normalize_match_text(" ".join([item.get("name", ""), *rubric_names(item)]))
     return any(word in text for word in EXCLUDED_RUBRIC_WORDS)
@@ -107,6 +132,9 @@ def item_to_candidate(item: dict[str, Any], city: str) -> StationCandidate | Non
     lat, lon = coords
     name = compact_text(item.get("name")) or "АЗС"
     brand = item_brand(item)
+    inferred_city = infer_city(item, city)
+    if inferred_city not in TARGET_CITIES:
+        return None
 
     return StationCandidate(
         source=SOURCE,
@@ -114,7 +142,7 @@ def item_to_candidate(item: dict[str, Any], city: str) -> StationCandidate | Non
         name=brand or name,
         brand=brand,
         address=item_address(item),
-        district=city,
+        district=inferred_city,
         lat=lat,
         lon=lon,
         confidence=100,
@@ -145,8 +173,23 @@ class TwoGisClient:
             raise RuntimeError(f"2GIS API error: {payload.get('meta')}")
         return payload
 
+    async def get_optional(self, path: str, **params: Any) -> dict[str, Any]:
+        response = await self.client.get(
+            f"{BASE_URL}{path}",
+            params={**params, "key": self.key},
+            headers={"User-Agent": "Baksignal/0.1"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        meta = payload.get("meta", {})
+        if meta.get("code") == 404:
+            return {"meta": meta, "result": {"items": []}}
+        if meta.get("code") not in (None, 200):
+            raise RuntimeError(f"2GIS API error: {meta}")
+        return payload
+
     async def find_region(self, city: str) -> TwoGisRegion:
-        payload = await self.get("/2.0/region/search", q=city)
+        payload = await self.get("/2.0/region/search", q=TARGET_CITY_POINTS.get(city, city))
         items = payload.get("result", {}).get("items", [])
         if not items:
             raise RuntimeError(f"2GIS region not found: {city}")
@@ -165,18 +208,16 @@ class TwoGisClient:
     async def find_fuel_rubrics(self, region: TwoGisRegion) -> set[int]:
         rubric_ids: set[int] = set()
         for query in RUBRIC_QUERIES:
-            payload = await self.get("/2.0/catalog/rubric/search", region_id=region.id, q=query)
+            payload = await self.get_optional("/2.0/catalog/rubric/search", region_id=region.id, q=query)
             for item in payload.get("result", {}).get("items", []):
                 name = normalize_match_text(item.get("name") or item.get("full_name"))
                 if not name or any(word in name for word in EXCLUDED_RUBRIC_WORDS):
                     continue
                 if "азс" in name or "автозаправ" in name or "заправ" in name:
                     rubric_ids.add(int(item["id"]))
-        if not rubric_ids:
-            raise RuntimeError(f"2GIS fuel rubric not found for {region.name}")
         return rubric_ids
 
-    async def fetch_items(self, region: TwoGisRegion, rubric_ids: set[int]) -> list[dict[str, Any]]:
+    async def fetch_items(self, region: TwoGisRegion, city: str, rubric_ids: set[int]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         page = 1
         fields = ",".join(
@@ -193,17 +234,23 @@ class TwoGisClient:
         )
 
         while True:
-            payload = await self.get(
-                "/3.0/items",
-                region_id=region.id,
-                rubric_id=",".join(str(rubric_id) for rubric_id in sorted(rubric_ids)),
-                fields=fields,
-                page=page,
-                page_size=PAGE_SIZE,
-            )
+            params: dict[str, Any] = {
+                "region_id": region.id,
+                "point": TARGET_CITY_POINTS[city],
+                "radius": TARGET_CITY_RADIUS_M[city],
+                "fields": fields,
+                "page": page,
+                "page_size": PAGE_SIZE,
+            }
+            if rubric_ids:
+                params["rubric_id"] = ",".join(str(rubric_id) for rubric_id in sorted(rubric_ids))
+            else:
+                params["q"] = "АЗС"
+
+            payload = await self.get_optional("/3.0/items", **params)
             page_items = payload.get("result", {}).get("items", [])
             items.extend(page_items)
-            if len(page_items) < PAGE_SIZE:
+            if len(page_items) < PAGE_SIZE or page >= MAX_PAGES:
                 return items
             page += 1
 
@@ -268,7 +315,7 @@ async def fetch_candidates() -> list[StationCandidate]:
         for city in TARGET_CITIES:
             region = await client.find_region(city)
             rubrics = await client.find_fuel_rubrics(region)
-            items = await client.fetch_items(region, rubrics)
+            items = await client.fetch_items(region, city, rubrics)
             candidates.extend(
                 candidate
                 for item in items
