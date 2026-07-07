@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./baksignal.db"
     telegram_bot_token: str | None = None
     mini_app_url: str | None = None
+    dgis_api_key: str | None = None
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     status_fresh_minutes: int = Field(default=60, ge=1)
     status_stale_minutes: int = Field(default=120, ge=1)

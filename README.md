@@ -39,6 +39,31 @@ API docs: http://127.0.0.1:8000/docs
 .\.venv\Scripts\python.exe -m app.scripts.import_osm_stations
 ```
 
+## Import stations from 2GIS
+
+2GIS is the preferred reference source for a clean Saratov/Engels station directory,
+but the public API rules restrict saving/caching API products unless your agreement
+allows it. Use dry-run first.
+
+1. Create an API key in 2GIS Platform Manager.
+2. Put it into `.env`:
+
+```env
+DGIS_API_KEY=...
+```
+
+3. Inspect candidates without writing to the database:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.scripts.import_2gis_stations
+```
+
+4. Write to the database only if your 2GIS terms allow storing this data:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.scripts.import_2gis_stations --commit --replace-directory --i-have-2gis-storage-permission
+```
+
 ## Temporary Mini App tunnel
 
 ```powershell
