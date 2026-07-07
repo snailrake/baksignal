@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: baksignal
+      POSTGRES_USER: baksignal
+      POSTGRES_PASSWORD: baksignal
+    ports:
+      - "5432:5432"
+    volumes:
+      - baksignal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baksignal -d baksignal"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  baksignal_pgdata:
+
